@@ -292,6 +292,21 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
   .detail-body{padding:0 20px 20px}
   .settings-panel{right:16px;bottom:56px}
 }
+
+/* Debug console */
+.debug-console{position:absolute;top:60px;left:12px;width:380px;max-height:300px;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:8px;font-family:var(--font-mono);font-size:10px;z-index:20;overflow:hidden;display:none;flex-direction:column}
+.debug-console.active{display:flex}
+.debug-header{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid rgba(255,255,255,.06);color:var(--text-muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
+.debug-header button{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px}
+.debug-body{flex:1;overflow-y:auto;padding:6px 10px;line-height:1.6}
+.debug-body::-webkit-scrollbar{width:3px}
+.debug-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1)}
+.dlog{margin:1px 0;word-break:break-all}
+.dlog.info{color:#7aa2f7}
+.dlog.ok{color:#9ece6a}
+.dlog.warn{color:#e0af68}
+.dlog.err{color:#f7768e}
+.dlog.dim{color:#555}
 </style>
 </head>
 <body>
@@ -371,35 +386,47 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
   <div class="settings-panel" id="panelAudio"><div class="panel-header">Audio Track</div><div id="audioTrackList"></div></div>
   <div class="settings-panel" id="panelSubs"><div class="panel-header">Subtitles</div><div id="subTrackList"></div></div>
   <div class="settings-panel" id="panelQuality"><div class="panel-header">Quality</div><div id="qualityList"></div></div>
+  <div class="debug-console active" id="debugConsole">
+    <div class="debug-header"><span>Debug Log (D to hide)</span><button onclick="document.getElementById('debugConsole').classList.remove('active')" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px">×</button></div>
+    <div class="debug-body" id="debugBody"></div>
+  </div>
 </div>
 
 <script>
-/* ═══════════════════════════════════════════════════════════════════
-   YUTA v1.0 — Jellyfin Client (Final Build)
-   ═══════════════════════════════════════════════════════════════════ */
+/* YUTA v1.1 — Debug Build */
 
-let SERVER='',API_KEY='',USER_ID='';
-let allItems=[],libraries=[];
-let currentPlayId=null, currentMediaSources=[];
-let currentAudioIndex=-1, currentSubIndex=-1, currentQuality='auto';
-let volume=1, isMuted=false;
+var debugBody = document.getElementById('debugBody');
+function dlog(msg, type) {
+  type = type || 'dim';
+  var d = document.createElement('div');
+  d.className = 'dlog ' + type;
+  d.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+  debugBody.appendChild(d);
+  debugBody.scrollTop = debugBody.scrollHeight;
+  console.log('[YUTA ' + type + ']', msg);
+}
 
-// ─── SETUP ───
+var SERVER='',API_KEY='',USER_ID='';
+var allItems=[],libraries=[];
+var currentPlayId=null, currentMediaSources=[];
+var currentAudioIndex=-1, currentSubIndex=-1, currentQuality='auto';
+var volume=1, isMuted=false;
+
 document.getElementById('btnConnect').addEventListener('click',connect);
-document.getElementById('password').addEventListener('keydown',e=>{if(e.key==='Enter')connect()});
+document.getElementById('password').addEventListener('keydown',function(e){if(e.key==='Enter')connect()});
 
 async function connect(){
-  const url=document.getElementById('serverUrl').value.trim().replace(/\/$/,'');
-  const user=document.getElementById('username').value.trim();
-  const pass=document.getElementById('password').value;
-  const err=document.getElementById('setupError');
-  if(!url){err.textContent='Enter your server URL';return}
+  var url=document.getElementById('serverUrl').value.trim().replace(/\/$/,'');
+  var user=document.getElementById('username').value.trim();
+  var pass=document.getElementById('password').value;
+  var err=document.getElementById('setupError');
+  if(!url){err.textContent='Enter server URL';return}
   if(!user){err.textContent='Enter username';return}
   err.textContent='Connecting...';
   try{
-    const r=await fetch(url+'/Users/AuthenticateByName',{method:'POST',headers:{'Content-Type':'application/json','X-Emby-Authorization':'MediaBrowser Client="Yuta",Device="Browser",DeviceId="yuta-'+Date.now()+'",Version="1.0.0"'},body:JSON.stringify({Username:user,Pw:pass})});
-    if(!r.ok)throw 0;
-    const d=await r.json();
+    var r=await fetch(url+'/Users/AuthenticateByName',{method:'POST',headers:{'Content-Type':'application/json','X-Emby-Authorization':'MediaBrowser Client="Yuta",Device="Browser",DeviceId="yuta-'+Date.now()+'",Version="1.0"'},body:JSON.stringify({Username:user,Pw:pass})});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    var d=await r.json();
     SERVER=url;API_KEY=d.AccessToken;USER_ID=d.User.Id;
     document.getElementById('serverLabel').textContent=url.replace(/^https?:\/\//,'').split('/')[0];
     document.getElementById('setupScreen').classList.add('hidden');
@@ -407,489 +434,265 @@ async function connect(){
     await loadLibrary();
     document.getElementById('loadingOverlay').classList.add('hidden');
     document.getElementById('appShell').classList.add('active');
-    setTimeout(()=>document.getElementById('loadingOverlay').style.display='none',600);
-  }catch(e){err.textContent='Connection failed — check URL and credentials'}
+    setTimeout(function(){document.getElementById('loadingOverlay').style.display='none'},600);
+  }catch(e){err.textContent='Connection failed: '+e.message}
 }
 
-function jfetch(p){return fetch(SERVER+p,{headers:{'X-Emby-Token':API_KEY}}).then(r=>r.json())}
+function jfetch(p){return fetch(SERVER+p,{headers:{'X-Emby-Token':API_KEY}}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status+' on '+p);return r.json()})}
 function imgUrl(id,t,w){return SERVER+'/Items/'+id+'/Images/'+(t||'Primary')+'?maxWidth='+(w||600)+'&quality=90&api_key='+API_KEY}
 
-// ─── LIBRARY ───
 async function loadLibrary(){
-  const v=await jfetch('/Users/'+USER_ID+'/Views');
-  libraries=v.Items||[];
-  const nav=document.getElementById('navSection');
-  libraries.forEach(lib=>{const el=document.createElement('div');el.className='nav-item';el.onclick=function(){filterNav(lib.Id,this)};el.innerHTML='<svg class="nav-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h12M3 9h8M3 14h10"/></svg>'+lib.Name;nav.appendChild(el)});
-  const ir=await jfetch('/Users/'+USER_ID+'/Items?Recursive=true&IncludeItemTypes=Series,Movie&SortBy=SortName&SortOrder=Ascending&Fields=Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,DateCreated&EnableImageTypes=Primary,Backdrop&Limit=200');
-  allItems=ir.Items||[];
-  renderApp(allItems);
+  var v=await jfetch('/Users/'+USER_ID+'/Views');libraries=v.Items||[];
+  var nav=document.getElementById('navSection');
+  libraries.forEach(function(lib){var el=document.createElement('div');el.className='nav-item';el.onclick=function(){filterNav(lib.Id,this)};el.innerHTML='<svg class="nav-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h12M3 9h8M3 14h10"/></svg>'+lib.Name;nav.appendChild(el)});
+  var ir=await jfetch('/Users/'+USER_ID+'/Items?Recursive=true&IncludeItemTypes=Series,Movie&SortBy=SortName&SortOrder=Ascending&Fields=Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,DateCreated&EnableImageTypes=Primary,Backdrop&Limit=200');
+  allItems=ir.Items||[];renderApp(allItems);
 }
-function filterNav(pid,el){document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));el.classList.add('active');if(!pid){renderApp(allItems);return}jfetch('/Users/'+USER_ID+'/Items?ParentId='+pid+'&Recursive=true&IncludeItemTypes=Series,Movie&SortBy=SortName&SortOrder=Ascending&Fields=Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,DateCreated&Limit=200').then(r=>renderApp(r.Items||[]))}
-let st;document.getElementById('searchInput').addEventListener('input',e=>{clearTimeout(st);st=setTimeout(()=>{const q=e.target.value.trim().toLowerCase();renderApp(q?allItems.filter(i=>(i.Name||'').toLowerCase().includes(q)):allItems)},300)});
+function filterNav(pid,el){document.querySelectorAll('.nav-item').forEach(function(n){n.classList.remove('active')});el.classList.add('active');if(!pid){renderApp(allItems);return}jfetch('/Users/'+USER_ID+'/Items?ParentId='+pid+'&Recursive=true&IncludeItemTypes=Series,Movie&SortBy=SortName&SortOrder=Ascending&Fields=Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,DateCreated&Limit=200').then(function(r){renderApp(r.Items||[])})}
+var sTO;document.getElementById('searchInput').addEventListener('input',function(e){clearTimeout(sTO);sTO=setTimeout(function(){var q=e.target.value.trim().toLowerCase();renderApp(q?allItems.filter(function(i){return(i.Name||'').toLowerCase().includes(q)}):allItems)},300)});
 
-// ─── RENDER ───
 function renderApp(items){
   if(!items.length){document.getElementById('hero').innerHTML='';document.getElementById('mainContent').innerHTML='<div class="empty-state">Nothing found</div>';return}
-  const wb=items.filter(i=>i.BackdropImageTags&&i.BackdropImageTags.length);
-  const hi=wb.length?wb[Math.floor(Math.random()*wb.length)]:items[0];
-  const hImg=hi.BackdropImageTags&&hi.BackdropImageTags.length?imgUrl(hi.Id,'Backdrop',1920):imgUrl(hi.Id,'Primary',1200);
-  document.getElementById('hero').innerHTML='<div class="hero-bg" style="background-image:url(\''+hImg+'\')"></div><div class="hero-overlay"></div><div class="hero-content"><div class="hero-tag">'+(hi.Type==='Series'?'Series':'Film')+'</div><div class="hero-title">'+(hi.Name||'')+'<em>.</em></div><div class="hero-meta">'+(hi.ProductionYear?'<span>'+hi.ProductionYear+'</span><span class="sep"></span>':'')+(hi.CommunityRating?'<span>★ '+hi.CommunityRating.toFixed(1)+'</span><span class="sep"></span>':'')+(hi.Genres&&hi.Genres.length?'<span>'+hi.Genres.slice(0,3).join(' · ')+'</span>':'')+'</div><div class="hero-desc">'+(hi.Overview||'')+'</div><div class="hero-actions"><button class="btn btn-primary" onclick="event.stopPropagation();playItem(\''+hi.Id+'\',\''+hi.Type+'\')"><svg viewBox="0 0 18 18" fill="currentColor"><polygon points="5,3 15,9 5,15"/></svg>Play</button><button class="btn btn-secondary" onclick="event.stopPropagation();openDetail(\''+hi.Id+'\')">More Info</button></div></div>';
+  var wb=items.filter(function(i){return i.BackdropImageTags&&i.BackdropImageTags.length});
+  var hi=wb.length?wb[Math.floor(Math.random()*wb.length)]:items[0];
+  var hImg=hi.BackdropImageTags&&hi.BackdropImageTags.length?imgUrl(hi.Id,'Backdrop',1920):imgUrl(hi.Id,'Primary',1200);
+  document.getElementById('hero').innerHTML='<div class="hero-bg" style="background-image:url(\''+hImg+'\')"></div><div class="hero-overlay"></div><div class="hero-content"><div class="hero-tag">'+(hi.Type==='Series'?'Series':'Film')+'</div><div class="hero-title">'+(hi.Name||'')+'<em>.</em></div><div class="hero-meta">'+(hi.ProductionYear?'<span>'+hi.ProductionYear+'</span><span class="sep"></span>':'')+(hi.CommunityRating?'<span>\u2605 '+hi.CommunityRating.toFixed(1)+'</span><span class="sep"></span>':'')+(hi.Genres&&hi.Genres.length?'<span>'+hi.Genres.slice(0,3).join(' \xb7 ')+'</span>':'')+'</div><div class="hero-desc">'+(hi.Overview||'')+'</div><div class="hero-actions"><button class="btn btn-primary" onclick="event.stopPropagation();playItem(\''+hi.Id+'\',\''+hi.Type+'\')"><svg viewBox="0 0 18 18" fill="currentColor"><polygon points="5,3 15,9 5,15"/></svg>Play</button><button class="btn btn-secondary" onclick="event.stopPropagation();openDetail(\''+hi.Id+'\')">More Info</button></div></div>';
   document.getElementById('hero').onclick=function(){openDetail(hi.Id)};
-  const gm={};items.forEach(it=>{(it.Genres||['Uncategorized']).forEach(g=>{if(!gm[g])gm[g]=[];if(!gm[g].find(x=>x.Id===it.Id))gm[g].push(it)})});
-  const recent=[...items].sort((a,b)=>new Date(b.DateCreated||0)-new Date(a.DateCreated||0)).slice(0,20);
-  let html=renderRow('Recently added',recent);
-  Object.entries(gm).sort((a,b)=>b[1].length-a[1].length).slice(0,10).forEach(([g,gi])=>{html+=renderRow(g,gi)});
+  var gm={};items.forEach(function(it){(it.Genres||['Uncategorized']).forEach(function(g){if(!gm[g])gm[g]=[];if(!gm[g].find(function(x){return x.Id===it.Id}))gm[g].push(it)})});
+  var recent=[...items].sort(function(a,b){return new Date(b.DateCreated||0)-new Date(a.DateCreated||0)}).slice(0,20);
+  var html=renderRow('Recently added',recent);
+  Object.entries(gm).sort(function(a,b){return b[1].length-a[1].length}).slice(0,10).forEach(function(p){html+=renderRow(p[0],p[1])});
   document.getElementById('mainContent').innerHTML=html;
 }
-function renderRow(title,items){let c='';items.forEach(i=>{c+='<div class="media-card" onclick="openDetail(\''+i.Id+'\')"><img src="'+imgUrl(i.Id,'Primary',300)+'" alt="" loading="lazy" onerror="this.style.display=\'none\'"><div class="card-overlay"><div class="card-title">'+(i.Name||'')+'</div><div class="card-year">'+(i.ProductionYear||'')+'</div></div><div class="card-play-icon" onclick="event.stopPropagation();playItem(\''+i.Id+'\',\''+i.Type+'\')"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="9,4 20,12 9,20"/></svg></div></div>'});return '<div class="media-section"><div class="section-header"><h2 class="section-title">'+title+'</h2><div class="section-line"></div></div><div class="media-row">'+c+'</div></div>'}
+function renderRow(title,items){var c='';items.forEach(function(i){c+='<div class="media-card" onclick="openDetail(\''+i.Id+'\')"><img src="'+imgUrl(i.Id,'Primary',300)+'" alt="" loading="lazy" onerror="this.style.display=\'none\'"><div class="card-overlay"><div class="card-title">'+(i.Name||'')+'</div><div class="card-year">'+(i.ProductionYear||'')+'</div></div><div class="card-play-icon" onclick="event.stopPropagation();playItem(\''+i.Id+'\',\''+i.Type+'\')"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="9,4 20,12 9,20"/></svg></div></div>'});return '<div class="media-section"><div class="section-header"><h2 class="section-title">'+title+'</h2><div class="section-line"></div></div><div class="media-row">'+c+'</div></div>'}
 
-// ─── DETAIL ───
 async function openDetail(id){
-  const item=await jfetch('/Users/'+USER_ID+'/Items/'+id+'?Fields=Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,Studios');
-  const sheet=document.getElementById('detailSheet');
-  const bImg=item.BackdropImageTags&&item.BackdropImageTags.length?imgUrl(item.Id,'Backdrop',1200):imgUrl(item.Id,'Primary',800);
-  const rt=item.RunTimeTicks?Math.round(item.RunTimeTicks/600000000)+'m':'';
-  let ep='';
-  if(item.Type==='Series'){try{const ss=await jfetch('/Shows/'+item.Id+'/Seasons?UserId='+USER_ID);if(ss.Items&&ss.Items.length){const eps=await jfetch('/Shows/'+item.Id+'/Episodes?SeasonId='+ss.Items[0].Id+'&UserId='+USER_ID+'&Fields=Overview,RunTimeTicks');let opts='';ss.Items.forEach(s=>{opts+='<option value="'+s.Id+'">'+s.Name+'</option>'});ep='<div class="episodes-section"><div class="episodes-header">Episodes</div><select class="season-select" onchange="loadSeason(\''+item.Id+'\',this.value)">'+opts+'</select><div class="episode-list" id="episodeList">'+renderEps(eps.Items||[])+'</div></div>';}}catch(e){}}
-  let gs='';(item.Genres||[]).forEach(g=>{gs+='<span class="genre-tag">'+g+'</span>'});
-  sheet.innerHTML='<div class="detail-banner"><img src="'+bImg+'" onerror="this.style.display=\'none\'"><div class="detail-banner-overlay"></div></div><button class="detail-close" onclick="closeDetail()">✕</button><div class="detail-body"><h2>'+(item.Name||'')+'</h2><div class="detail-meta">'+(item.ProductionYear?'<span>'+item.ProductionYear+'</span>':'')+(item.CommunityRating?'<span>★ '+item.CommunityRating.toFixed(1)+'</span>':'')+(rt?'<span>'+rt+'</span>':'')+'</div><div class="detail-genres">'+gs+'</div><button class="btn btn-primary" onclick="playItem(\''+item.Id+'\',\''+item.Type+'\')" style="margin-bottom:20px"><svg viewBox="0 0 18 18" fill="currentColor"><polygon points="5,3 15,9 5,15"/></svg>Play</button><p class="detail-desc">'+(item.Overview||'')+'</p>'+ep+'</div>';
+  var item=await jfetch('/Users/'+USER_ID+'/Items/'+id+'?Fields=Overview,Genres,CommunityRating,ProductionYear,RunTimeTicks,Studios');
+  var sheet=document.getElementById('detailSheet');
+  var bImg=item.BackdropImageTags&&item.BackdropImageTags.length?imgUrl(item.Id,'Backdrop',1200):imgUrl(item.Id,'Primary',800);
+  var rt=item.RunTimeTicks?Math.round(item.RunTimeTicks/600000000)+'m':'';
+  var ep='';
+  if(item.Type==='Series'){try{var ss=await jfetch('/Shows/'+item.Id+'/Seasons?UserId='+USER_ID);if(ss.Items&&ss.Items.length){var eps=await jfetch('/Shows/'+item.Id+'/Episodes?SeasonId='+ss.Items[0].Id+'&UserId='+USER_ID+'&Fields=Overview,RunTimeTicks');var opts='';ss.Items.forEach(function(s){opts+='<option value="'+s.Id+'">'+s.Name+'</option>'});ep='<div class="episodes-section"><div class="episodes-header">Episodes</div><select class="season-select" onchange="loadSeason(\''+item.Id+'\',this.value)">'+opts+'</select><div class="episode-list" id="episodeList">'+renderEps(eps.Items||[])+'</div></div>';}}catch(e){}}
+  var gs='';(item.Genres||[]).forEach(function(g){gs+='<span class="genre-tag">'+g+'</span>'});
+  sheet.innerHTML='<div class="detail-banner"><img src="'+bImg+'" onerror="this.style.display=\'none\'"><div class="detail-banner-overlay"></div></div><button class="detail-close" onclick="closeDetail()">\u2715</button><div class="detail-body"><h2>'+(item.Name||'')+'</h2><div class="detail-meta">'+(item.ProductionYear?'<span>'+item.ProductionYear+'</span>':'')+(item.CommunityRating?'<span>\u2605 '+item.CommunityRating.toFixed(1)+'</span>':'')+(rt?'<span>'+rt+'</span>':'')+'</div><div class="detail-genres">'+gs+'</div><button class="btn btn-primary" onclick="playItem(\''+item.Id+'\',\''+item.Type+'\')" style="margin-bottom:20px"><svg viewBox="0 0 18 18" fill="currentColor"><polygon points="5,3 15,9 5,15"/></svg>Play</button><p class="detail-desc">'+(item.Overview||'')+'</p>'+ep+'</div>';
   document.getElementById('detailModal').classList.add('open');document.body.style.overflow='hidden';
 }
-function renderEps(eps){let h='';eps.forEach((e,i)=>{const d=e.RunTimeTicks?Math.round(e.RunTimeTicks/600000000)+'m':'';h+='<div class="episode-item" onclick="playItem(\''+e.Id+'\',\'Episode\')"><div class="ep-num">'+(e.IndexNumber||i+1)+'</div><div class="ep-thumb"><img src="'+imgUrl(e.Id,'Primary',200)+'" onerror="this.parentElement.style.background=\'var(--bg-elevated)\'"></div><div class="ep-info"><h4>'+(e.Name||'Episode '+(i+1))+'</h4><p>'+(e.Overview||'').substring(0,80)+'</p></div><div class="ep-duration">'+d+'</div></div>'});return h}
-async function loadSeason(sid,ssid){const eps=await jfetch('/Shows/'+sid+'/Episodes?SeasonId='+ssid+'&UserId='+USER_ID+'&Fields=Overview,RunTimeTicks');document.getElementById('episodeList').innerHTML=renderEps(eps.Items||[])}
+function renderEps(eps){var h='';eps.forEach(function(e,i){var d=e.RunTimeTicks?Math.round(e.RunTimeTicks/600000000)+'m':'';h+='<div class="episode-item" onclick="playItem(\''+e.Id+'\',\'Episode\')"><div class="ep-num">'+(e.IndexNumber||i+1)+'</div><div class="ep-thumb"><img src="'+imgUrl(e.Id,'Primary',200)+'" onerror="this.parentElement.style.background=\'var(--bg-elevated)\'"></div><div class="ep-info"><h4>'+(e.Name||'Episode '+(i+1))+'</h4><p>'+(e.Overview||'').substring(0,80)+'</p></div><div class="ep-duration">'+d+'</div></div>'});return h}
+async function loadSeason(sid,ssid){var eps=await jfetch('/Shows/'+sid+'/Episodes?SeasonId='+ssid+'&UserId='+USER_ID+'&Fields=Overview,RunTimeTicks');document.getElementById('episodeList').innerHTML=renderEps(eps.Items||[])}
 function closeDetail(){document.getElementById('detailModal').classList.remove('open');document.body.style.overflow=''}
 
+/* ═══ VIDEO PLAYER ENGINE ═══ */
+var video = document.getElementById('videoPlayer');
+var pc = document.getElementById('playerContainer');
+var playerLoading = document.getElementById('playerLoading');
+var isPlaying = false, controlsTimeout, rafId = null, liquidRafId = null, playerActive = false;
 
-/* ═══════════════════════════════════════════════════════════════════
-   VIDEO PLAYER ENGINE — Complete Rewrite
-   
-   Architecture:
-   1. Initial play: Try direct stream (Static=true) first — fast, no server load
-   2. If direct fails: Automatically retry with transcoding (Static=false, h264+aac)
-   3. Track changes: ALWAYS use transcoding — only way Jellyfin honors track params
-   4. Seek-after-source-change: Wait for loadedmetadata, THEN seek, THEN play
-   5. Liquid volume only animates when player is visible
-   ═══════════════════════════════════════════════════════════════════ */
+(function(){var amb=document.getElementById('rikaAmbient');for(var i=0;i<8;i++){var p=document.createElement('div');p.className='rika-particle';p.style.cssText='left:'+Math.random()*100+'%;bottom:'+Math.random()*30+'%;--dur:'+(5+Math.random()*5)+'s;--delay:'+Math.random()*8+'s';amb.appendChild(p)}})();
 
-const video = document.getElementById('videoPlayer');
-const pc = document.getElementById('playerContainer');
-const playerLoading = document.getElementById('playerLoading');
-let isPlaying = false, controlsTimeout, rafId = null, liquidRafId = null;
-let playerActive = false; // controls liquid animation lifecycle
+function showLoading(show){playerLoading.classList.toggle('active',show)}
 
-// Rika particles (8 instead of 15 for performance)
-(function(){
-  const amb = document.getElementById('rikaAmbient');
-  for(let i = 0; i < 8; i++){
-    const p = document.createElement('div');
-    p.className = 'rika-particle';
-    p.style.cssText = 'left:'+Math.random()*100+'%;bottom:'+Math.random()*30+'%;--dur:'+(5+Math.random()*5)+'s;--delay:'+Math.random()*8+'s';
-    amb.appendChild(p);
-  }
-})();
-
-function showLoading(show) {
-  playerLoading.classList.toggle('active', show);
+function canDirectPlay(ms){
+  if(!ms)return false;
+  var c=(ms.Container||'').toLowerCase();
+  var vs=(ms.MediaStreams||[]).find(function(s){return s.Type==='Video'});
+  var vc=vs?(vs.Codec||'').toLowerCase():'';
+  dlog('Container: '+c+', Video codec: '+vc,'info');
+  var cOk=['mp4','webm','mov'].indexOf(c)>=0;
+  var vOk=['h264','avc','vp8','vp9'].indexOf(vc)>=0;
+  dlog('Direct play possible: '+(cOk&&vOk),'info');
+  return cOk&&vOk;
 }
 
-/* ── Build stream URL ── */
-function buildStreamUrl(playId, opts) {
-  opts = opts || {};
-  const params = new URLSearchParams();
-  params.set('api_key', API_KEY);
-
-  // Determine if we need transcoding
-  // Transcoding required when: switching tracks, changing quality, or fallback mode
-  const needsTranscode = opts.forceTranscode || opts.audioIndex >= 0 || opts.subtitleIndex >= 0 || (opts.quality && opts.quality !== 'auto' && opts.quality !== 'original');
-
-  if (needsTranscode) {
-    params.set('Static', 'false');
-    params.set('VideoCodec', 'h264');
-    params.set('AudioCodec', 'aac,mp3');
-    params.set('Container', 'ts');
-    params.set('TranscodingContainer', 'ts');
-    if (opts.audioIndex >= 0) params.set('AudioStreamIndex', opts.audioIndex);
-    if (opts.subtitleIndex >= 0) {
-      params.set('SubtitleStreamIndex', opts.subtitleIndex);
-      params.set('SubtitleMethod', 'Encode');
-    }
-    if (opts.quality && opts.quality !== 'auto' && opts.quality !== 'original') {
-      params.set('VideoBitRate', opts.quality);
-    }
-    // Add MediaSourceId for transcoding
-    if (currentMediaSources[0]) {
-      params.set('MediaSourceId', currentMediaSources[0].Id);
-    }
-  } else {
-    // Direct play — serve the raw file
-    params.set('Static', 'true');
+function buildStreamUrl(playId,opts){
+  opts=opts||{};
+  var params=new URLSearchParams();
+  params.set('api_key',API_KEY);
+  if(opts.direct){
+    params.set('Static','true');
+    dlog('Mode: DIRECT (Static=true)','ok');
+  }else{
+    params.set('Static','false');
+    params.set('VideoCodec','h264');
+    params.set('AudioCodec','aac');
+    params.set('Container','mp4');
+    params.set('TranscodingProtocol','http');
+    if(currentMediaSources[0])params.set('MediaSourceId',currentMediaSources[0].Id);
+    if(opts.audioIndex>=0)params.set('AudioStreamIndex',String(opts.audioIndex));
+    if(opts.subtitleIndex>=0){params.set('SubtitleStreamIndex',String(opts.subtitleIndex));params.set('SubtitleMethod','Encode')}
+    if(opts.quality&&opts.quality!=='auto'&&opts.quality!=='original'){params.set('VideoBitRate',opts.quality);params.set('AudioBitRate','192000')}
+    dlog('Mode: TRANSCODE (h264+aac, mp4)','warn');
   }
-
-  return SERVER + '/Videos/' + playId + '/stream?' + params.toString();
+  var url=SERVER+'/Videos/'+playId+'/stream?'+params.toString();
+  dlog('URL: '+url.substring(0,150)+'...','dim');
+  return url;
 }
 
-/* ── Core stream loader with proper event sequencing ── */
-function loadStream(seekTo) {
-  if (!currentPlayId) return;
-
+function loadStream(seekTo){
+  if(!currentPlayId){dlog('No currentPlayId!','err');return}
   showLoading(true);
+  dlog('--- loadStream(seekTo='+Math.round(seekTo||0)+') ---','info');
 
-  const opts = {};
-  // Only add track params if user has explicitly changed them
-  if (currentAudioIndex >= 0) opts.audioIndex = currentAudioIndex;
-  if (currentSubIndex >= 0) opts.subtitleIndex = currentSubIndex;
-  if (currentQuality && currentQuality !== 'auto') opts.quality = currentQuality;
-  // If any track is set, force transcode
-  if (currentAudioIndex >= 0 || currentSubIndex >= 0) opts.forceTranscode = true;
+  var ms=currentMediaSources[0];
+  var direct=canDirectPlay(ms);
+  if(currentAudioIndex>=0||currentSubIndex>=0){dlog('Track override -> force transcode','warn');direct=false}
 
-  const url = buildStreamUrl(currentPlayId, opts);
+  var opts={direct:direct};
+  if(currentAudioIndex>=0)opts.audioIndex=currentAudioIndex;
+  if(currentSubIndex>=0)opts.subtitleIndex=currentSubIndex;
+  if(currentQuality&&currentQuality!=='auto')opts.quality=currentQuality;
 
-  // Clean up all listeners first
-  video.onloadedmetadata = null;
-  video.oncanplay = null;
-  video.onerror = null;
+  var url=buildStreamUrl(currentPlayId,opts);
+
+  // Clear ALL handlers
+  video.onloadedmetadata=null;video.oncanplay=null;video.onerror=null;video.onloadeddata=null;video.onstalled=null;
   video.pause();
 
-  // Set up event chain: loaded → seek → play
-  video.onloadedmetadata = function() {
-    video.onloadedmetadata = null;
-    // Seek if needed
-    if (seekTo && seekTo > 0 && isFinite(seekTo)) {
-      video.currentTime = seekTo;
-    }
-    // Now wait for canplay (may fire immediately if already buffered enough)
-    video.oncanplay = function() {
-      video.oncanplay = null;
+  function attempt(streamUrl,num){
+    dlog('Attempt #'+num+': setting src','info');
+
+    video.onloadedmetadata=function(){
+      dlog('>> loadedmetadata (dur='+video.duration+')','ok');
+      if(seekTo>0&&isFinite(seekTo)&&isFinite(video.duration)){dlog('Seeking to '+seekTo.toFixed(1)+'s','info');video.currentTime=seekTo}
+    };
+
+    video.oncanplay=function(){
+      video.oncanplay=null;
+      dlog('>> canplay -> playing!','ok');
       showLoading(false);
-      video.play().then(function() {
-        isPlaying = true;
-        updatePlayIcon();
-        startProgressLoop();
-      }).catch(function() {
-        // Autoplay blocked — user needs to click play
-        isPlaying = false;
-        updatePlayIcon();
+      video.play().then(function(){isPlaying=true;updatePlayIcon();startProgressLoop();dlog('Playback OK','ok')}).catch(function(e){dlog('play() rejected: '+e.message,'warn');isPlaying=false;updatePlayIcon();showLoading(false)});
+    };
+
+    video.onerror=function(){
+      var c=video.error?video.error.code:'?';
+      var m=video.error?video.error.message:'unknown';
+      dlog('>> ERROR code='+c+' msg='+m,'err');
+      if(num===1&&direct){
+        dlog('Direct failed, retrying with transcode...','warn');
+        opts.direct=false;
+        attempt(buildStreamUrl(currentPlayId,opts),2);
+      }else{
         showLoading(false);
-      });
+        dlog('ALL ATTEMPTS FAILED','err');
+      }
     };
-  };
 
-  // Error handler: if direct play fails, retry with transcoding
-  video.onerror = function() {
-    video.onerror = null;
-    var errCode = video.error ? video.error.code : 0;
-    console.log('Stream error (code ' + errCode + '). Retrying with transcoding...');
+    video.onstalled=function(){dlog('>> stalled','warn')};
 
-    // If we were already transcoding, give up
-    if (opts.forceTranscode) {
-      showLoading(false);
-      console.error('Transcoded stream also failed.');
-      return;
-    }
-
-    // Retry with forced transcoding
-    opts.forceTranscode = true;
-    var url2 = buildStreamUrl(currentPlayId, opts);
-
-    video.onloadedmetadata = function() {
-      video.onloadedmetadata = null;
-      if (seekTo && seekTo > 0 && isFinite(seekTo)) video.currentTime = seekTo;
-      video.oncanplay = function() {
-        video.oncanplay = null;
-        showLoading(false);
-        video.play().then(function() { isPlaying = true; updatePlayIcon(); startProgressLoop(); }).catch(function() { isPlaying = false; updatePlayIcon(); showLoading(false); });
-      };
-    };
-    video.onerror = function() {
-      video.onerror = null;
-      showLoading(false);
-      console.error('All playback attempts failed.');
-    };
-    video.src = url2;
+    video.src=streamUrl;
+    dlog('Calling video.load()','info');
     video.load();
-  };
-
-  video.src = url;
-  video.load();
-  video.volume = volume;
-  video.muted = isMuted;
-}
-
-/* ── Play item ── */
-async function playItem(id, type) {
-  let playId = id;
-  if (type === 'Series') {
-    try {
-      const ss = await jfetch('/Shows/' + id + '/Seasons?UserId=' + USER_ID);
-      if (ss.Items && ss.Items.length) {
-        const eps = await jfetch('/Shows/' + id + '/Episodes?SeasonId=' + ss.Items[0].Id + '&UserId=' + USER_ID + '&Limit=1');
-        if (eps.Items && eps.Items.length) playId = eps.Items[0].Id;
-      }
-    } catch(e) {}
   }
 
-  currentPlayId = playId;
-  currentAudioIndex = -1;
-  currentSubIndex = -1;
-  currentQuality = 'auto';
-
-  // Fetch playback info
-  try {
-    const pb = await jfetch('/Items/' + playId + '/PlaybackInfo?UserId=' + USER_ID);
-    currentMediaSources = pb.MediaSources || [];
-    populateTrackPanels();
-  } catch(e) { currentMediaSources = []; }
-
-  // Get title info
-  try {
-    const item = await jfetch('/Users/' + USER_ID + '/Items/' + playId);
-    document.getElementById('playerSeriesName').textContent = item.SeriesName || '';
-    document.getElementById('playerEpTitle').textContent = item.Name || '';
-  } catch(e) {}
-
-  // Show player with animation
-  pc.classList.add('active', 'entering', 'show-controls');
-  playerActive = true;
-  startLiquidAnimation();
-  closeDetail();
-
-  setTimeout(function() {
-    pc.classList.remove('entering');
-    loadStream(0);
-    startControlsTimer();
-  }, 800);
+  attempt(url, direct?1:2);
+  video.volume=volume;video.muted=isMuted;
 }
 
-function closePlayer() {
-  video.pause();
-  video.onloadedmetadata = null;
-  video.oncanplay = null;
-  video.onerror = null;
-  video.removeAttribute('src');
-  video.load(); // reset
-  pc.classList.remove('active', 'show-controls');
-  isPlaying = false;
-  playerActive = false;
-  updatePlayIcon();
-  cancelAnimationFrame(rafId);
-  cancelAnimationFrame(liquidRafId);
-  closeAllPanels();
-  showLoading(false);
-  document.body.style.overflow = '';
-}
+// Log ALL video events
+['loadstart','durationchange','progress','suspend','abort','emptied','play','playing','pause','waiting','seeking','seeked','ended'].forEach(function(evt){
+  video.addEventListener(evt,function(){
+    var x='';
+    if(evt==='durationchange')x=' dur='+video.duration;
+    if(evt==='progress'&&video.buffered.length)x=' buf='+video.buffered.end(video.buffered.length-1).toFixed(1)+'s';
+    dlog('>> '+evt+x,'dim');
+  });
+});
 
-function togglePlay() {
-  if (video.paused) {
-    video.play().then(function() { isPlaying = true; updatePlayIcon(); startProgressLoop(); }).catch(function(e) { console.log('Play failed:', e); });
-  } else {
-    video.pause();
-    isPlaying = false;
-    updatePlayIcon();
-  }
-}
-function updatePlayIcon() {
-  document.getElementById('iconPlay').style.display = isPlaying ? 'none' : 'block';
-  document.getElementById('iconPause').style.display = isPlaying ? 'block' : 'none';
-}
-function skip(s) { if (video.duration) video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + s)); }
+async function playItem(id,type){
+  dlog('=== playItem('+id+', '+type+') ===','info');
+  var playId=id;
+  if(type==='Series'){try{
+    dlog('Resolving series -> episode...','info');
+    var ss=await jfetch('/Shows/'+id+'/Seasons?UserId='+USER_ID);
+    if(ss.Items&&ss.Items.length){var eps=await jfetch('/Shows/'+id+'/Episodes?SeasonId='+ss.Items[0].Id+'&UserId='+USER_ID+'&Limit=1');if(eps.Items&&eps.Items.length){playId=eps.Items[0].Id;dlog('Episode: '+playId,'ok')}}
+  }catch(e){dlog('Resolve error: '+e.message,'err')}}
 
-/* ── Progress loop — throttled to 10fps for perf ── */
-var lastProg = 0;
-function startProgressLoop() {
-  cancelAnimationFrame(rafId);
-  function tick(ts) {
-    if (ts - lastProg > 100) { // 10fps
-      lastProg = ts;
-      if (video.duration) {
-        document.getElementById('progressBar').style.width = (video.currentTime / video.duration * 100) + '%';
-        document.getElementById('timeCurrent').textContent = fmt(video.currentTime);
-        document.getElementById('timeDuration').textContent = fmt(video.duration);
-        if (video.buffered.length) {
-          document.getElementById('progressBuffer').style.width = (video.buffered.end(video.buffered.length - 1) / video.duration * 100) + '%';
-        }
-      }
+  currentPlayId=playId;currentAudioIndex=-1;currentSubIndex=-1;currentQuality='auto';
+
+  try{
+    dlog('Fetching PlaybackInfo...','info');
+    var pb=await jfetch('/Items/'+playId+'/PlaybackInfo?UserId='+USER_ID);
+    currentMediaSources=pb.MediaSources||[];
+    dlog(currentMediaSources.length+' media source(s)','ok');
+    if(currentMediaSources[0]){
+      var ms=currentMediaSources[0];
+      dlog('Container='+ms.Container+' Bitrate='+ms.Bitrate,'info');
+      (ms.MediaStreams||[]).forEach(function(s){dlog('  #'+s.Index+' '+s.Type+' '+s.Codec+(s.Language?' ['+s.Language+']':'')+(s.DisplayTitle?' "'+s.DisplayTitle+'"':''),'dim')});
     }
-    if (!video.paused) rafId = requestAnimationFrame(tick);
-  }
-  rafId = requestAnimationFrame(tick);
+    populateTrackPanels();
+  }catch(e){dlog('PlaybackInfo error: '+e.message,'err');currentMediaSources=[]}
+
+  try{var item=await jfetch('/Users/'+USER_ID+'/Items/'+playId);document.getElementById('playerSeriesName').textContent=item.SeriesName||'';document.getElementById('playerEpTitle').textContent=item.Name||''}catch(e){}
+
+  debugBody.innerHTML='';
+  pc.classList.add('active','entering','show-controls');
+  document.getElementById('debugConsole').classList.add('active');
+  playerActive=true;startLiquidAnimation();closeDetail();
+
+  setTimeout(function(){pc.classList.remove('entering');loadStream(0);startControlsTimer()},600);
 }
 
-// Video events
-video.addEventListener('playing', function() { isPlaying = true; updatePlayIcon(); startProgressLoop(); showLoading(false); });
-video.addEventListener('waiting', function() { showLoading(true); });
-video.addEventListener('pause', function() { isPlaying = false; updatePlayIcon(); });
+function closePlayer(){video.pause();video.onloadedmetadata=null;video.oncanplay=null;video.onerror=null;video.removeAttribute('src');video.load();pc.classList.remove('active','show-controls');isPlaying=false;playerActive=false;updatePlayIcon();cancelAnimationFrame(rafId);cancelAnimationFrame(liquidRafId);closeAllPanels();showLoading(false);document.body.style.overflow=''}
+function togglePlay(){if(video.paused){video.play().then(function(){isPlaying=true;updatePlayIcon();startProgressLoop()}).catch(function(e){dlog('Play: '+e.message,'err')})}else{video.pause();isPlaying=false;updatePlayIcon()}}
+function updatePlayIcon(){document.getElementById('iconPlay').style.display=isPlaying?'none':'block';document.getElementById('iconPause').style.display=isPlaying?'block':'none'}
+function skip(s){if(video.duration)video.currentTime=Math.max(0,Math.min(video.duration,video.currentTime+s))}
 
-// Progress bar
-var pw = document.getElementById('progressWrap');
-pw.addEventListener('click', function(e) { if (!video.duration) return; var r = pw.getBoundingClientRect(); video.currentTime = ((e.clientX - r.left) / r.width) * video.duration; });
-pw.addEventListener('mousemove', function(e) { if (!video.duration) return; var r = pw.getBoundingClientRect(); var tt = document.getElementById('progressTooltip'); tt.textContent = fmt(((e.clientX - r.left) / r.width) * video.duration); tt.style.left = (e.clientX - r.left) + 'px'; });
-function fmt(s) { if (!s || !isFinite(s)) return '00:00'; var h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60); return (h ? h+':' : '') + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0'); }
+var lastProg=0;
+function startProgressLoop(){cancelAnimationFrame(rafId);function tick(ts){if(ts-lastProg>100){lastProg=ts;if(video.duration){document.getElementById('progressBar').style.width=(video.currentTime/video.duration*100)+'%';document.getElementById('timeCurrent').textContent=fmt(video.currentTime);document.getElementById('timeDuration').textContent=fmt(video.duration);if(video.buffered.length)document.getElementById('progressBuffer').style.width=(video.buffered.end(video.buffered.length-1)/video.duration*100)+'%'}}if(!video.paused)rafId=requestAnimationFrame(tick)}rafId=requestAnimationFrame(tick)}
 
-// Volume
-function toggleMute() { isMuted = !isMuted; video.muted = isMuted; }
-document.getElementById('liquidVolumeWrap').addEventListener('click', function(e) {
-  var r = e.currentTarget.getBoundingClientRect();
-  volume = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  video.volume = volume; isMuted = false; video.muted = false;
-});
+video.addEventListener('playing',function(){isPlaying=true;updatePlayIcon();startProgressLoop();showLoading(false)});
+video.addEventListener('waiting',function(){showLoading(true)});
+video.addEventListener('pause',function(){isPlaying=false;updatePlayIcon()});
 
-// Liquid volume — ONLY runs when player is active
-var lvCanvas = document.getElementById('liquidVolumeCanvas');
-var lvCtx = lvCanvas.getContext('2d');
-var liquidFrame = 0;
-function drawLiquidVolume() {
-  var w = lvCanvas.width, h = lvCanvas.height;
-  var vol = isMuted ? 0 : volume;
-  var fillW = vol * w;
-  lvCtx.clearRect(0, 0, w, h);
-  var trackY = h/2 - 3, trackH = 6;
-  lvCtx.fillStyle = 'rgba(255,255,255,0.06)';
-  lvCtx.beginPath(); lvCtx.roundRect(0, trackY, w, trackH, 3); lvCtx.fill();
-  if (fillW < 1) return;
-  lvCtx.save();
-  lvCtx.beginPath(); lvCtx.roundRect(0, trackY - 6, fillW + 6, trackH + 12, 4); lvCtx.clip();
-  var grad = lvCtx.createLinearGradient(0, 0, fillW, 0);
-  grad.addColorStop(0, '#c8aa82'); grad.addColorStop(1, '#4a7dff');
-  lvCtx.fillStyle = grad;
-  lvCtx.beginPath(); lvCtx.moveTo(0, h);
-  for (var x = 0; x <= fillW; x += 2) { // step by 2 for perf
-    var wave = Math.sin(x * 0.08 + liquidFrame * 0.06) * 3 * vol + Math.sin(x * 0.04 + liquidFrame * 0.03) * 2 * vol;
-    lvCtx.lineTo(x, h/2 - trackH + wave);
-  }
-  lvCtx.lineTo(fillW, h); lvCtx.closePath(); lvCtx.fill();
-  lvCtx.globalAlpha = 0.3;
-  lvCtx.beginPath();
-  for (var x2 = 0; x2 <= fillW; x2 += 3) {
-    var wave2 = Math.sin(x2 * 0.08 + liquidFrame * 0.06) * 3 * vol;
-    if (x2 === 0) lvCtx.moveTo(x2, h/2 - trackH + wave2 - 1); else lvCtx.lineTo(x2, h/2 - trackH + wave2 - 1);
-  }
-  lvCtx.strokeStyle = 'rgba(255,255,255,0.6)'; lvCtx.lineWidth = 1; lvCtx.stroke();
-  lvCtx.restore();
-  lvCtx.beginPath(); lvCtx.arc(fillW, h/2, 5, 0, Math.PI * 2); lvCtx.fillStyle = '#fff'; lvCtx.fill();
-  lvCtx.beginPath(); lvCtx.arc(fillW, h/2, 8, 0, Math.PI * 2); lvCtx.fillStyle = 'rgba(200,170,130,0.15)'; lvCtx.fill();
-}
-function startLiquidAnimation() {
-  cancelAnimationFrame(liquidRafId);
-  function tick() {
-    if (!playerActive) return;
-    liquidFrame++;
-    drawLiquidVolume();
-    liquidRafId = requestAnimationFrame(tick);
-  }
-  liquidRafId = requestAnimationFrame(tick);
-}
+var pw=document.getElementById('progressWrap');
+pw.addEventListener('click',function(e){if(!video.duration)return;var r=pw.getBoundingClientRect();video.currentTime=((e.clientX-r.left)/r.width)*video.duration});
+pw.addEventListener('mousemove',function(e){if(!video.duration)return;var r=pw.getBoundingClientRect();document.getElementById('progressTooltip').textContent=fmt(((e.clientX-r.left)/r.width)*video.duration);document.getElementById('progressTooltip').style.left=(e.clientX-r.left)+'px'});
+function fmt(s){if(!s||!isFinite(s))return'00:00';var h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sc=Math.floor(s%60);return(h?h+':':'')+String(m).padStart(2,'0')+':'+String(sc).padStart(2,'0')}
 
-// Fullscreen
-function toggleFullscreen() { if (!document.fullscreenElement) pc.requestFullscreen().catch(function(){}); else document.exitFullscreen(); }
+function toggleMute(){isMuted=!isMuted;video.muted=isMuted}
+document.getElementById('liquidVolumeWrap').addEventListener('click',function(e){var r=e.currentTarget.getBoundingClientRect();volume=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));video.volume=volume;isMuted=false;video.muted=false});
 
-// Controls timer
-function startControlsTimer() { clearTimeout(controlsTimeout); pc.classList.add('show-controls'); controlsTimeout = setTimeout(function() { if (isPlaying) { pc.classList.remove('show-controls'); closeAllPanels(); } }, 3500); }
-pc.addEventListener('mousemove', startControlsTimer);
-pc.addEventListener('click', function(e) { if (e.target === video) { togglePlay(); startControlsTimer(); } });
+var lvCanvas=document.getElementById('liquidVolumeCanvas'),lvCtx=lvCanvas.getContext('2d'),liquidFrame=0;
+function drawLiquidVolume(){var w=lvCanvas.width,h=lvCanvas.height,vol=isMuted?0:volume,fW=vol*w;lvCtx.clearRect(0,0,w,h);var tY=h/2-3,tH=6;lvCtx.fillStyle='rgba(255,255,255,0.06)';lvCtx.beginPath();lvCtx.roundRect(0,tY,w,tH,3);lvCtx.fill();if(fW<1)return;lvCtx.save();lvCtx.beginPath();lvCtx.roundRect(0,tY-6,fW+6,tH+12,4);lvCtx.clip();var g=lvCtx.createLinearGradient(0,0,fW,0);g.addColorStop(0,'#c8aa82');g.addColorStop(1,'#4a7dff');lvCtx.fillStyle=g;lvCtx.beginPath();lvCtx.moveTo(0,h);for(var x=0;x<=fW;x+=2)lvCtx.lineTo(x,h/2-tH+Math.sin(x*.08+liquidFrame*.06)*3*vol+Math.sin(x*.04+liquidFrame*.03)*2*vol);lvCtx.lineTo(fW,h);lvCtx.closePath();lvCtx.fill();lvCtx.globalAlpha=.3;lvCtx.beginPath();for(var x2=0;x2<=fW;x2+=3){var wv=Math.sin(x2*.08+liquidFrame*.06)*3*vol;if(x2===0)lvCtx.moveTo(x2,h/2-tH+wv-1);else lvCtx.lineTo(x2,h/2-tH+wv-1)}lvCtx.strokeStyle='rgba(255,255,255,0.6)';lvCtx.lineWidth=1;lvCtx.stroke();lvCtx.restore();lvCtx.beginPath();lvCtx.arc(fW,h/2,5,0,Math.PI*2);lvCtx.fillStyle='#fff';lvCtx.fill()}
+function startLiquidAnimation(){cancelAnimationFrame(liquidRafId);function t(){if(!playerActive)return;liquidFrame++;drawLiquidVolume();liquidRafId=requestAnimationFrame(t)}liquidRafId=requestAnimationFrame(t)}
 
-// Keyboard
-document.addEventListener('keydown', function(e) {
-  if (!pc.classList.contains('active')) return;
-  if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); }
-  if (e.key === 'ArrowRight') skip(10);
-  if (e.key === 'ArrowLeft') skip(-10);
-  if (e.key === 'f') toggleFullscreen();
-  if (e.key === 'Escape') closePlayer();
-  if (e.key === 'm') toggleMute();
-  if (e.key === 'ArrowUp') { e.preventDefault(); volume = Math.min(1, volume + .05); video.volume = volume; isMuted = false; video.muted = false; }
-  if (e.key === 'ArrowDown') { e.preventDefault(); volume = Math.max(0, volume - .05); video.volume = volume; }
+function toggleFullscreen(){if(!document.fullscreenElement)pc.requestFullscreen().catch(function(){});else document.exitFullscreen()}
+function startControlsTimer(){clearTimeout(controlsTimeout);pc.classList.add('show-controls');controlsTimeout=setTimeout(function(){if(isPlaying){pc.classList.remove('show-controls');closeAllPanels()}},3500)}
+pc.addEventListener('mousemove',startControlsTimer);
+pc.addEventListener('click',function(e){if(e.target===video){togglePlay();startControlsTimer()}});
+
+document.addEventListener('keydown',function(e){
+  if(e.key==='d'||e.key==='D'){document.getElementById('debugConsole').classList.toggle('active');return}
+  if(!pc.classList.contains('active'))return;
+  if(e.key===' '||e.key==='k'){e.preventDefault();togglePlay()}
+  if(e.key==='ArrowRight')skip(10);if(e.key==='ArrowLeft')skip(-10);
+  if(e.key==='f')toggleFullscreen();if(e.key==='Escape')closePlayer();if(e.key==='m')toggleMute();
+  if(e.key==='ArrowUp'){e.preventDefault();volume=Math.min(1,volume+.05);video.volume=volume;isMuted=false;video.muted=false}
+  if(e.key==='ArrowDown'){e.preventDefault();volume=Math.max(0,volume-.05);video.volume=volume}
   startControlsTimer();
 });
 
-/* ── TRACK PANELS ── */
-var openPanelName = null;
-function togglePanel(name) {
-  var panels = {audio: 'panelAudio', subs: 'panelSubs', quality: 'panelQuality'};
-  if (openPanelName === name) { closeAllPanels(); return; }
-  closeAllPanels();
-  document.getElementById(panels[name]).classList.add('open');
-  openPanelName = name;
-  startControlsTimer();
-}
-function closeAllPanels() {
-  document.querySelectorAll('.settings-panel').forEach(function(p) { p.classList.remove('open'); });
-  openPanelName = null;
-}
+var openPanelName=null;
+function togglePanel(name){var ps={audio:'panelAudio',subs:'panelSubs',quality:'panelQuality'};if(openPanelName===name){closeAllPanels();return}closeAllPanels();document.getElementById(ps[name]).classList.add('open');openPanelName=name;startControlsTimer()}
+function closeAllPanels(){document.querySelectorAll('.settings-panel').forEach(function(p){p.classList.remove('open')});openPanelName=null}
 
-function populateTrackPanels() {
-  var src = currentMediaSources[0];
-  if (!src) return;
-  var streams = src.MediaStreams || [];
-
-  // Audio
-  var audioStreams = streams.filter(function(s) { return s.Type === 'Audio'; });
-  var al = document.getElementById('audioTrackList');
-  if (audioStreams.length) {
-    var defAudio = audioStreams.find(function(s) { return s.IsDefault; }) || audioStreams[0];
-    al.innerHTML = audioStreams.map(function(s) {
-      var label = s.DisplayTitle || s.Language || 'Track ' + (s.Index + 1);
-      var meta = (s.Codec || '').toUpperCase() + (s.Channels ? ' · ' + s.Channels + 'ch' : '');
-      return '<div class="panel-option' + (s.Index === defAudio.Index ? ' selected' : '') + '" onclick="event.stopPropagation();selectAudioTrack(' + s.Index + ',this)"><div class="opt-label">' + label + '</div><div class="opt-meta">' + meta + '</div></div>';
-    }).join('');
-    document.getElementById('audioTrackLabel').textContent = defAudio.DisplayTitle || defAudio.Language || 'Audio';
-  } else {
-    al.innerHTML = '<div class="panel-option" style="color:var(--text-muted)">No audio tracks</div>';
-  }
-
-  // Subtitles
-  var subStreams = streams.filter(function(s) { return s.Type === 'Subtitle'; });
-  var sl = document.getElementById('subTrackList');
-  sl.innerHTML = '<div class="panel-option selected" onclick="event.stopPropagation();selectSubTrack(-1,this)"><div class="opt-label">Off</div></div>' +
-    subStreams.map(function(s) {
-      var label = s.DisplayTitle || s.Language || 'Subtitle ' + (s.Index + 1);
-      var meta = (s.Codec || '') + (s.IsForced ? ' · Forced' : '');
-      return '<div class="panel-option" onclick="event.stopPropagation();selectSubTrack(' + s.Index + ',this)"><div class="opt-label">' + label + '</div><div class="opt-meta">' + meta + '</div></div>';
-    }).join('');
-
-  // Quality
-  var ql = document.getElementById('qualityList');
-  var br = src.Bitrate;
-  var qOpts = '<div class="panel-option selected" onclick="event.stopPropagation();selectQuality(\'auto\',this)"><div class="opt-label">Auto (Direct)</div></div>';
-  if (br) {
-    qOpts += '<div class="panel-option" onclick="event.stopPropagation();selectQuality(\'original\',this)"><div class="opt-label">Original</div><div class="opt-meta">' + Math.round(br/1000000) + ' Mbps</div></div>';
-    if (br > 8000000) qOpts += '<div class="panel-option" onclick="event.stopPropagation();selectQuality(\'8000000\',this)"><div class="opt-label">1080p</div><div class="opt-meta">8 Mbps</div></div>';
-    if (br > 4000000) qOpts += '<div class="panel-option" onclick="event.stopPropagation();selectQuality(\'4000000\',this)"><div class="opt-label">720p</div><div class="opt-meta">4 Mbps</div></div>';
-    qOpts += '<div class="panel-option" onclick="event.stopPropagation();selectQuality(\'2000000\',this)"><div class="opt-label">480p</div><div class="opt-meta">2 Mbps</div></div>';
-  }
-  ql.innerHTML = qOpts;
+function populateTrackPanels(){
+  var src=currentMediaSources[0];if(!src)return;var streams=src.MediaStreams||[];
+  var as=streams.filter(function(s){return s.Type==='Audio'});
+  var al=document.getElementById('audioTrackList');
+  if(as.length){var da=as.find(function(s){return s.IsDefault})||as[0];al.innerHTML=as.map(function(s){return'<div class="panel-option'+(s.Index===da.Index?' selected':'')+'" onclick="event.stopPropagation();selectAudioTrack('+s.Index+',this)"><div class="opt-label">'+(s.DisplayTitle||s.Language||'Track '+(s.Index+1))+'</div><div class="opt-meta">'+(s.Codec||'').toUpperCase()+(s.Channels?' \xb7 '+s.Channels+'ch':'')+'</div></div>'}).join('');document.getElementById('audioTrackLabel').textContent=da.DisplayTitle||da.Language||'Audio'}
+  else{al.innerHTML='<div class="panel-option" style="color:var(--text-muted)">No audio</div>'}
+  var ss=streams.filter(function(s){return s.Type==='Subtitle'});
+  var sl=document.getElementById('subTrackList');
+  sl.innerHTML='<div class="panel-option selected" onclick="event.stopPropagation();selectSubTrack(-1,this)"><div class="opt-label">Off</div></div>'+ss.map(function(s){return'<div class="panel-option" onclick="event.stopPropagation();selectSubTrack('+s.Index+',this)"><div class="opt-label">'+(s.DisplayTitle||s.Language||'Sub '+(s.Index+1))+'</div><div class="opt-meta">'+(s.Codec||'')+(s.IsForced?' \xb7 Forced':'')+'</div></div>'}).join('');
+  var ql=document.getElementById('qualityList'),br=src.Bitrate;
+  var q='<div class="panel-option selected" onclick="event.stopPropagation();selectQuality(\'auto\',this)"><div class="opt-label">Auto</div></div>';
+  if(br){q+='<div class="panel-option" onclick="event.stopPropagation();selectQuality(\'original\',this)"><div class="opt-label">Original</div><div class="opt-meta">'+Math.round(br/1e6)+' Mbps</div></div>';if(br>8e6)q+='<div class="panel-option" onclick="event.stopPropagation();selectQuality(\'8000000\',this)"><div class="opt-label">1080p</div></div>';if(br>4e6)q+='<div class="panel-option" onclick="event.stopPropagation();selectQuality(\'4000000\',this)"><div class="opt-label">720p</div></div>';q+='<div class="panel-option" onclick="event.stopPropagation();selectQuality(\'2000000\',this)"><div class="opt-label">480p</div></div>'}
+  ql.innerHTML=q;
 }
 
-function selectAudioTrack(idx, el) {
-  if (idx === currentAudioIndex) { closeAllPanels(); return; }
-  el.parentElement.querySelectorAll('.panel-option').forEach(function(o) { o.classList.remove('selected'); });
-  el.classList.add('selected');
-  currentAudioIndex = idx;
-  document.getElementById('audioTrackLabel').textContent = el.querySelector('.opt-label').textContent;
-  closeAllPanels();
-  // Reload stream with new track, keeping position
-  var pos = video.currentTime;
-  loadStream(pos);
-}
-
-function selectSubTrack(idx, el) {
-  el.parentElement.querySelectorAll('.panel-option').forEach(function(o) { o.classList.remove('selected'); });
-  el.classList.add('selected');
-  currentSubIndex = idx;
-  closeAllPanels();
-  // Reload stream with new subtitle track, keeping position
-  var pos = video.currentTime;
-  loadStream(pos);
-}
-
-function selectQuality(val, el) {
-  el.parentElement.querySelectorAll('.panel-option').forEach(function(o) { o.classList.remove('selected'); });
-  el.classList.add('selected');
-  currentQuality = val;
-  document.getElementById('qualityLabel').textContent = el.querySelector('.opt-label').textContent;
-  closeAllPanels();
-  var pos = video.currentTime;
-  loadStream(pos);
-}
+function selectAudioTrack(idx,el){if(idx===currentAudioIndex){closeAllPanels();return}el.parentElement.querySelectorAll('.panel-option').forEach(function(o){o.classList.remove('selected')});el.classList.add('selected');currentAudioIndex=idx;document.getElementById('audioTrackLabel').textContent=el.querySelector('.opt-label').textContent;closeAllPanels();dlog('Audio->'+idx+' reloading','info');loadStream(video.currentTime)}
+function selectSubTrack(idx,el){el.parentElement.querySelectorAll('.panel-option').forEach(function(o){o.classList.remove('selected')});el.classList.add('selected');currentSubIndex=idx;closeAllPanels();dlog('Sub->'+idx+' reloading','info');loadStream(video.currentTime)}
+function selectQuality(val,el){el.parentElement.querySelectorAll('.panel-option').forEach(function(o){o.classList.remove('selected')});el.classList.add('selected');currentQuality=val;document.getElementById('qualityLabel').textContent=el.querySelector('.opt-label').textContent;closeAllPanels();dlog('Quality->'+val+' reloading','info');loadStream(video.currentTime)}
 </script>
 </body>
 </html>
