@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Yuta</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -491,6 +492,8 @@ var isPlaying = false, controlsTimeout, rafId = null, liquidRafId = null, player
 
 function showLoading(show){playerLoading.classList.toggle('active',show)}
 
+var hlsInstance = null; // hls.js instance
+
 function canDirectPlay(ms){
   if(!ms)return false;
   var c=(ms.Container||'').toLowerCase();
@@ -499,47 +502,20 @@ function canDirectPlay(ms){
   var as=(ms.MediaStreams||[]).find(function(s){return s.Type==='Audio'});
   var ac=as?(as.Codec||'').toLowerCase():'';
   dlog('Container: '+c+', Video: '+vc+', Audio: '+ac,'info');
-  // Only mp4/webm with h264+aac/mp3 can truly direct play in all browsers
   var cOk=['mp4','webm','mov'].indexOf(c)>=0;
   var vOk=['h264','avc','vp8','vp9'].indexOf(vc)>=0;
-  var aOk=['aac','mp3','opus','vorbis','flac'].indexOf(ac)>=0;
+  // Opus only works in webm, not mp4/mkv for browser playback
+  var aOk=['aac','mp3','vorbis'].indexOf(ac)>=0 || (ac==='opus'&&c==='webm');
   var ok=cOk&&vOk&&aOk;
-  dlog('Direct play: '+(ok?'YES':'NO (need remux/transcode)'),'info');
+  dlog('Direct play: '+(ok?'YES':'NO (need transcode)'),'info');
   return ok;
 }
 
-function buildStreamUrl(playId,opts){
-  opts=opts||{};
-  var params=new URLSearchParams();
-  params.set('api_key',API_KEY);
-  var msId=currentMediaSources[0]?currentMediaSources[0].Id:playId;
-
-  if(opts.direct){
-    // Serve raw file
-    params.set('Static','true');
-    params.set('MediaSourceId',msId);
-    dlog('Mode: DIRECT (Static=true)','ok');
-    var url=SERVER+'/Videos/'+playId+'/stream.'+currentMediaSources[0].Container+'?'+params.toString();
-    dlog('URL: '+url.substring(0,150)+'...','dim');
-    return url;
-  }else{
-    // Use Jellyfin's universal endpoint for proper HLS transcoding
-    // This is what the official Jellyfin web client uses
-    params.set('MediaSourceId',msId);
-    params.set('VideoCodec','h264');
-    params.set('AudioCodec','aac');
-    params.set('Container','ts');
-    params.set('TranscodingContainer','ts');
-    params.set('TranscodingProtocol','http');
-    params.set('StartTimeTicks', String(Math.round((opts.seekTo||0)*10000000)));
-    params.set('CopyTimestamps','true');
-    if(opts.audioIndex>=0)params.set('AudioStreamIndex',String(opts.audioIndex));
-    if(opts.subtitleIndex>=0){params.set('SubtitleStreamIndex',String(opts.subtitleIndex));params.set('SubtitleMethod','Encode')}
-    if(opts.quality&&opts.quality!=='auto'&&opts.quality!=='original'){params.set('VideoBitRate',opts.quality);params.set('AudioBitRate','192000')}
-    dlog('Mode: TRANSCODE (h264+aac, ts container)','warn');
-    var url=SERVER+'/Videos/'+playId+'/stream.ts?'+params.toString();
-    dlog('URL: '+url.substring(0,150)+'...','dim');
-    return url;
+function destroyHls(){
+  if(hlsInstance){
+    hlsInstance.destroy();
+    hlsInstance=null;
+    dlog('HLS instance destroyed','dim');
   }
 }
 
@@ -554,108 +530,138 @@ function loadStream(seekTo){
   if(currentAudioIndex>=0||currentSubIndex>=0){dlog('Track override -> force transcode','warn');direct=false}
   if(currentQuality&&currentQuality!=='auto'){dlog('Quality override -> force transcode','warn');direct=false}
 
-  // Clear ALL handlers
-  video.onloadedmetadata=null;video.oncanplay=null;video.onerror=null;video.onloadeddata=null;video.onstalled=null;
+  // Clean up previous
+  destroyHls();
+  video.onloadedmetadata=null;video.oncanplay=null;video.onerror=null;
   video.pause();
 
-  // Build list of URLs to try in order
-  var urlsToTry=[];
-  var msId=currentMediaSources[0]?currentMediaSources[0].Id:currentPlayId;
+  var msId=ms?ms.Id:currentPlayId;
 
   if(direct){
-    // Try 1: Direct play
+    // Direct play — simple src assignment
     var dp=new URLSearchParams();dp.set('api_key',API_KEY);dp.set('Static','true');dp.set('MediaSourceId',msId);
-    urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream?'+dp.toString(),label:'Direct (Static=true)',isDirect:true});
-  }
+    var url=SERVER+'/Videos/'+currentPlayId+'/stream?'+dp.toString();
+    dlog('Mode: DIRECT PLAY','ok');
+    dlog('URL: '+url.substring(0,150)+'...','dim');
 
-  // Try: Transcode via /stream endpoint (no extension)
-  var t1=new URLSearchParams();
-  t1.set('api_key',API_KEY);t1.set('Static','false');t1.set('MediaSourceId',msId);
-  t1.set('VideoCodec','h264');t1.set('AudioCodec','aac');
-  t1.set('Container','ts');t1.set('TranscodingContainer','ts');t1.set('TranscodingProtocol','http');
-  if(seekTo>0)t1.set('StartTimeTicks',String(Math.round(seekTo*10000000)));
-  if(currentAudioIndex>=0)t1.set('AudioStreamIndex',String(currentAudioIndex));
-  if(currentSubIndex>=0){t1.set('SubtitleStreamIndex',String(currentSubIndex));t1.set('SubtitleMethod','Encode')}
-  if(currentQuality&&currentQuality!=='auto'&&currentQuality!=='original')t1.set('VideoBitRate',currentQuality);
-  urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream?'+t1.toString(),label:'Transcode (ts, /stream)',isDirect:false});
-
-  // Try: Transcode via /stream.ts
-  urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream.ts?'+t1.toString(),label:'Transcode (ts, /stream.ts)',isDirect:false});
-
-  // Try: Transcode to mp4 container  
-  var t2=new URLSearchParams();
-  t2.set('api_key',API_KEY);t2.set('Static','false');t2.set('MediaSourceId',msId);
-  t2.set('VideoCodec','h264');t2.set('AudioCodec','aac');
-  t2.set('Container','mp4');
-  if(seekTo>0)t2.set('StartTimeTicks',String(Math.round(seekTo*10000000)));
-  if(currentAudioIndex>=0)t2.set('AudioStreamIndex',String(currentAudioIndex));
-  if(currentSubIndex>=0){t2.set('SubtitleStreamIndex',String(currentSubIndex));t2.set('SubtitleMethod','Encode')}
-  urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream.mp4?'+t2.toString(),label:'Transcode (mp4, /stream.mp4)',isDirect:false});
-
-  // Try: Just raw static (might work for MKV in Chrome)
-  var t3=new URLSearchParams();t3.set('api_key',API_KEY);t3.set('Static','true');
-  urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream?'+t3.toString(),label:'Raw static (last resort)',isDirect:true});
-
-  var attemptIdx=0;
-
-  function tryNext(){
-    if(attemptIdx>=urlsToTry.length){
-      showLoading(false);
-      dlog('ALL '+urlsToTry.length+' ATTEMPTS FAILED','err');
-      dlog('Check: Is ffmpeg installed on Jellyfin server?','err');
-      dlog('Check: Dashboard > Playback > Transcoding enabled?','err');
-      return;
-    }
-    var entry=urlsToTry[attemptIdx];
-    attemptIdx++;
-    dlog('--- Attempt '+attemptIdx+'/'+urlsToTry.length+': '+entry.label+' ---','info');
-    dlog('URL: '+entry.url.substring(0,160)+'...','dim');
-
-    // First probe with fetch to check HTTP status
-    fetch(entry.url,{method:'HEAD',headers:{'X-Emby-Token':API_KEY}}).then(function(resp){
-      dlog('HTTP probe: '+resp.status+' '+resp.statusText+' (type='+resp.headers.get('content-type')+')','info');
-      if(resp.status>=400){
-        dlog('Server returned '+resp.status+' — skipping this URL','warn');
-        tryNext();
-        return;
-      }
-      // HTTP looks ok, try playing
-      playUrl(entry.url,entry.isDirect);
-    }).catch(function(e){
-      dlog('Fetch probe failed: '+e.message+' — trying video element directly','warn');
-      // Fetch failed (maybe CORS on HEAD), try video element anyway
-      playUrl(entry.url,entry.isDirect);
-    });
-  }
-
-  function playUrl(streamUrl,isDirect){
     video.onloadedmetadata=function(){
       dlog('>> loadedmetadata (dur='+video.duration+')','ok');
-      if(isDirect&&seekTo>0&&isFinite(seekTo)&&isFinite(video.duration)){
-        dlog('Seeking to '+seekTo.toFixed(1)+'s (direct)','info');
-        video.currentTime=seekTo;
-      }
+      if(seekTo>0&&isFinite(video.duration)){video.currentTime=seekTo;dlog('Seeking to '+seekTo+'s','info')}
     };
     video.oncanplay=function(){
       video.oncanplay=null;
-      dlog('>> canplay -> playing!','ok');
+      dlog('>> canplay','ok');
       showLoading(false);
       video.play().then(function(){isPlaying=true;updatePlayIcon();startProgressLoop();dlog('Playback OK','ok')}).catch(function(e){dlog('play() rejected: '+e.message,'warn');isPlaying=false;updatePlayIcon();showLoading(false)});
     };
     video.onerror=function(){
-      var c=video.error?video.error.code:'?';
-      var m=video.error?video.error.message:'unknown';
-      dlog('>> video ERROR code='+c+' msg='+m,'err');
-      // Try next URL
-      tryNext();
+      dlog('>> Direct play failed (code='+((video.error&&video.error.code)||'?')+'), falling back to HLS transcode','warn');
+      direct=false;
+      loadStreamHLS(seekTo,msId);
     };
-    video.onstalled=function(){dlog('>> stalled','warn')};
-    video.src=streamUrl;
+    video.src=url;
     video.load();
+    video.volume=volume;video.muted=isMuted;
+  } else {
+    loadStreamHLS(seekTo,msId);
+  }
+}
+
+function loadStreamHLS(seekTo,msId){
+  dlog('Mode: HLS TRANSCODE','warn');
+
+  // Build the Jellyfin HLS master playlist URL
+  // This is the endpoint the official Jellyfin web client uses
+  var params=new URLSearchParams();
+  params.set('api_key',API_KEY);
+  params.set('MediaSourceId',msId);
+  params.set('DeviceId','yuta-player');
+  params.set('VideoCodec','h264');
+  params.set('AudioCodec','aac');
+  params.set('Container','ts');
+  params.set('TranscodingContainer','ts');
+  params.set('TranscodingProtocol','hls');
+  params.set('SegmentContainer','ts');
+  params.set('MinSegments','1');
+  params.set('BreakOnNonKeyFrames','true');
+  params.set('TranscodeReasons','ContainerNotSupported');
+  if(seekTo>0) params.set('StartTimeTicks',String(Math.round(seekTo*10000000)));
+  if(currentAudioIndex>=0) params.set('AudioStreamIndex',String(currentAudioIndex));
+  if(currentSubIndex>=0){params.set('SubtitleStreamIndex',String(currentSubIndex));params.set('SubtitleMethod','Encode')}
+  if(currentQuality&&currentQuality!=='auto'&&currentQuality!=='original'){
+    params.set('VideoBitRate',currentQuality);
+    params.set('AudioBitRate','192000');
   }
 
-  tryNext();
-  video.volume=volume;video.muted=isMuted;
+  var hlsUrl=SERVER+'/Videos/'+currentPlayId+'/master.m3u8?'+params.toString();
+  dlog('HLS URL: '+hlsUrl.substring(0,160)+'...','dim');
+
+  if(typeof Hls!=='undefined'&&Hls.isSupported()){
+    dlog('Using hls.js (MSE supported)','ok');
+    destroyHls();
+    hlsInstance=new Hls({
+      maxBufferLength:30,
+      maxMaxBufferLength:60,
+      startPosition:seekTo>0?-1:0
+    });
+
+    hlsInstance.on(Hls.Events.MANIFEST_PARSED,function(ev,data){
+      dlog('HLS manifest parsed: '+data.levels.length+' quality level(s)','ok');
+      showLoading(false);
+      video.play().then(function(){isPlaying=true;updatePlayIcon();startProgressLoop();dlog('HLS playback started','ok')}).catch(function(e){dlog('play() rejected: '+e.message,'warn');isPlaying=false;updatePlayIcon();showLoading(false)});
+    });
+
+    hlsInstance.on(Hls.Events.ERROR,function(ev,data){
+      dlog('HLS error: type='+data.type+' details='+data.details+' fatal='+data.fatal,'err');
+      if(data.fatal){
+        switch(data.type){
+          case Hls.ErrorTypes.NETWORK_ERROR:
+            dlog('Network error — attempting recovery','warn');
+            hlsInstance.startLoad();
+            break;
+          case Hls.ErrorTypes.MEDIA_ERROR:
+            dlog('Media error — attempting recovery','warn');
+            hlsInstance.recoverMediaError();
+            break;
+          default:
+            dlog('Unrecoverable HLS error','err');
+            destroyHls();
+            showLoading(false);
+            break;
+        }
+      }
+    });
+
+    hlsInstance.on(Hls.Events.FRAG_BUFFERED,function(){
+      if(showLoading) showLoading(false);
+    });
+
+    hlsInstance.loadSource(hlsUrl);
+    hlsInstance.attachMedia(video);
+    video.volume=volume;video.muted=isMuted;
+
+  } else if(video.canPlayType('application/vnd.apple.mpegurl')){
+    // Safari native HLS
+    dlog('Using native HLS (Safari)','ok');
+    video.src=hlsUrl;
+    video.onloadedmetadata=function(){
+      dlog('>> loadedmetadata (dur='+video.duration+')','ok');
+    };
+    video.oncanplay=function(){
+      video.oncanplay=null;
+      showLoading(false);
+      video.play().then(function(){isPlaying=true;updatePlayIcon();startProgressLoop();dlog('Native HLS playback OK','ok')}).catch(function(e){dlog('play() rejected: '+e.message,'warn')});
+    };
+    video.onerror=function(){
+      dlog('>> Native HLS error: '+((video.error&&video.error.message)||'unknown'),'err');
+      showLoading(false);
+    };
+    video.load();
+    video.volume=volume;video.muted=isMuted;
+  } else {
+    dlog('Browser supports neither MSE nor native HLS!','err');
+    showLoading(false);
+  }
 }
 
 // Log ALL video events
@@ -702,7 +708,7 @@ async function playItem(id,type){
   setTimeout(function(){pc.classList.remove('entering');loadStream(0);startControlsTimer()},600);
 }
 
-function closePlayer(){video.pause();video.onloadedmetadata=null;video.oncanplay=null;video.onerror=null;video.removeAttribute('src');video.load();pc.classList.remove('active','show-controls');isPlaying=false;playerActive=false;updatePlayIcon();cancelAnimationFrame(rafId);cancelAnimationFrame(liquidRafId);closeAllPanels();showLoading(false);document.body.style.overflow=''}
+function closePlayer(){destroyHls();video.pause();video.onloadedmetadata=null;video.oncanplay=null;video.onerror=null;video.removeAttribute('src');video.load();pc.classList.remove('active','show-controls');isPlaying=false;playerActive=false;updatePlayIcon();cancelAnimationFrame(rafId);cancelAnimationFrame(liquidRafId);closeAllPanels();showLoading(false);document.body.style.overflow=''}
 function togglePlay(){if(video.paused){video.play().then(function(){isPlaying=true;updatePlayIcon();startProgressLoop()}).catch(function(e){dlog('Play: '+e.message,'err')})}else{video.pause();isPlaying=false;updatePlayIcon()}}
 function updatePlayIcon(){document.getElementById('iconPlay').style.display=isPlaying?'none':'block';document.getElementById('iconPause').style.display=isPlaying?'block':'none'}
 function skip(s){if(video.duration)video.currentTime=Math.max(0,Math.min(video.duration,video.currentTime+s))}
