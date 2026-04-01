@@ -554,59 +554,107 @@ function loadStream(seekTo){
   if(currentAudioIndex>=0||currentSubIndex>=0){dlog('Track override -> force transcode','warn');direct=false}
   if(currentQuality&&currentQuality!=='auto'){dlog('Quality override -> force transcode','warn');direct=false}
 
-  var opts={direct:direct,seekTo:seekTo};
-  if(currentAudioIndex>=0)opts.audioIndex=currentAudioIndex;
-  if(currentSubIndex>=0)opts.subtitleIndex=currentSubIndex;
-  if(currentQuality&&currentQuality!=='auto')opts.quality=currentQuality;
-
-  var url=buildStreamUrl(currentPlayId,opts);
-
   // Clear ALL handlers
   video.onloadedmetadata=null;video.oncanplay=null;video.onerror=null;video.onloadeddata=null;video.onstalled=null;
   video.pause();
 
-  function attempt(streamUrl,num,isDirect){
-    dlog('Attempt #'+num+': setting src','info');
+  // Build list of URLs to try in order
+  var urlsToTry=[];
+  var msId=currentMediaSources[0]?currentMediaSources[0].Id:currentPlayId;
 
+  if(direct){
+    // Try 1: Direct play
+    var dp=new URLSearchParams();dp.set('api_key',API_KEY);dp.set('Static','true');dp.set('MediaSourceId',msId);
+    urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream?'+dp.toString(),label:'Direct (Static=true)',isDirect:true});
+  }
+
+  // Try: Transcode via /stream endpoint (no extension)
+  var t1=new URLSearchParams();
+  t1.set('api_key',API_KEY);t1.set('Static','false');t1.set('MediaSourceId',msId);
+  t1.set('VideoCodec','h264');t1.set('AudioCodec','aac');
+  t1.set('Container','ts');t1.set('TranscodingContainer','ts');t1.set('TranscodingProtocol','http');
+  if(seekTo>0)t1.set('StartTimeTicks',String(Math.round(seekTo*10000000)));
+  if(currentAudioIndex>=0)t1.set('AudioStreamIndex',String(currentAudioIndex));
+  if(currentSubIndex>=0){t1.set('SubtitleStreamIndex',String(currentSubIndex));t1.set('SubtitleMethod','Encode')}
+  if(currentQuality&&currentQuality!=='auto'&&currentQuality!=='original')t1.set('VideoBitRate',currentQuality);
+  urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream?'+t1.toString(),label:'Transcode (ts, /stream)',isDirect:false});
+
+  // Try: Transcode via /stream.ts
+  urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream.ts?'+t1.toString(),label:'Transcode (ts, /stream.ts)',isDirect:false});
+
+  // Try: Transcode to mp4 container  
+  var t2=new URLSearchParams();
+  t2.set('api_key',API_KEY);t2.set('Static','false');t2.set('MediaSourceId',msId);
+  t2.set('VideoCodec','h264');t2.set('AudioCodec','aac');
+  t2.set('Container','mp4');
+  if(seekTo>0)t2.set('StartTimeTicks',String(Math.round(seekTo*10000000)));
+  if(currentAudioIndex>=0)t2.set('AudioStreamIndex',String(currentAudioIndex));
+  if(currentSubIndex>=0){t2.set('SubtitleStreamIndex',String(currentSubIndex));t2.set('SubtitleMethod','Encode')}
+  urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream.mp4?'+t2.toString(),label:'Transcode (mp4, /stream.mp4)',isDirect:false});
+
+  // Try: Just raw static (might work for MKV in Chrome)
+  var t3=new URLSearchParams();t3.set('api_key',API_KEY);t3.set('Static','true');
+  urlsToTry.push({url:SERVER+'/Videos/'+currentPlayId+'/stream?'+t3.toString(),label:'Raw static (last resort)',isDirect:true});
+
+  var attemptIdx=0;
+
+  function tryNext(){
+    if(attemptIdx>=urlsToTry.length){
+      showLoading(false);
+      dlog('ALL '+urlsToTry.length+' ATTEMPTS FAILED','err');
+      dlog('Check: Is ffmpeg installed on Jellyfin server?','err');
+      dlog('Check: Dashboard > Playback > Transcoding enabled?','err');
+      return;
+    }
+    var entry=urlsToTry[attemptIdx];
+    attemptIdx++;
+    dlog('--- Attempt '+attemptIdx+'/'+urlsToTry.length+': '+entry.label+' ---','info');
+    dlog('URL: '+entry.url.substring(0,160)+'...','dim');
+
+    // First probe with fetch to check HTTP status
+    fetch(entry.url,{method:'HEAD',headers:{'X-Emby-Token':API_KEY}}).then(function(resp){
+      dlog('HTTP probe: '+resp.status+' '+resp.statusText+' (type='+resp.headers.get('content-type')+')','info');
+      if(resp.status>=400){
+        dlog('Server returned '+resp.status+' — skipping this URL','warn');
+        tryNext();
+        return;
+      }
+      // HTTP looks ok, try playing
+      playUrl(entry.url,entry.isDirect);
+    }).catch(function(e){
+      dlog('Fetch probe failed: '+e.message+' — trying video element directly','warn');
+      // Fetch failed (maybe CORS on HEAD), try video element anyway
+      playUrl(entry.url,entry.isDirect);
+    });
+  }
+
+  function playUrl(streamUrl,isDirect){
     video.onloadedmetadata=function(){
       dlog('>> loadedmetadata (dur='+video.duration+')','ok');
-      // For direct play, seek in browser. For transcode, Jellyfin handles it via StartTimeTicks
       if(isDirect&&seekTo>0&&isFinite(seekTo)&&isFinite(video.duration)){
-        dlog('Seeking to '+seekTo.toFixed(1)+'s (direct mode)','info');
+        dlog('Seeking to '+seekTo.toFixed(1)+'s (direct)','info');
         video.currentTime=seekTo;
       }
     };
-
     video.oncanplay=function(){
       video.oncanplay=null;
       dlog('>> canplay -> playing!','ok');
       showLoading(false);
       video.play().then(function(){isPlaying=true;updatePlayIcon();startProgressLoop();dlog('Playback OK','ok')}).catch(function(e){dlog('play() rejected: '+e.message,'warn');isPlaying=false;updatePlayIcon();showLoading(false)});
     };
-
     video.onerror=function(){
       var c=video.error?video.error.code:'?';
       var m=video.error?video.error.message:'unknown';
-      dlog('>> ERROR code='+c+' msg='+m,'err');
-      if(num===1&&isDirect){
-        dlog('Direct failed, retrying with transcode...','warn');
-        opts.direct=false;
-        attempt(buildStreamUrl(currentPlayId,opts),2,false);
-      }else{
-        showLoading(false);
-        dlog('ALL ATTEMPTS FAILED. Check Jellyfin server logs.','err');
-        dlog('Common fixes: enable transcoding in Jellyfin, install ffmpeg','err');
-      }
+      dlog('>> video ERROR code='+c+' msg='+m,'err');
+      // Try next URL
+      tryNext();
     };
-
     video.onstalled=function(){dlog('>> stalled','warn')};
-
     video.src=streamUrl;
-    dlog('Calling video.load()','info');
     video.load();
   }
 
-  attempt(url, direct?1:2, direct);
+  tryNext();
   video.volume=volume;video.muted=isMuted;
 }
 
