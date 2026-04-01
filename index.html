@@ -496,47 +496,65 @@ function canDirectPlay(ms){
   var c=(ms.Container||'').toLowerCase();
   var vs=(ms.MediaStreams||[]).find(function(s){return s.Type==='Video'});
   var vc=vs?(vs.Codec||'').toLowerCase():'';
-  dlog('Container: '+c+', Video codec: '+vc,'info');
+  var as=(ms.MediaStreams||[]).find(function(s){return s.Type==='Audio'});
+  var ac=as?(as.Codec||'').toLowerCase():'';
+  dlog('Container: '+c+', Video: '+vc+', Audio: '+ac,'info');
+  // Only mp4/webm with h264+aac/mp3 can truly direct play in all browsers
   var cOk=['mp4','webm','mov'].indexOf(c)>=0;
   var vOk=['h264','avc','vp8','vp9'].indexOf(vc)>=0;
-  dlog('Direct play possible: '+(cOk&&vOk),'info');
-  return cOk&&vOk;
+  var aOk=['aac','mp3','opus','vorbis','flac'].indexOf(ac)>=0;
+  var ok=cOk&&vOk&&aOk;
+  dlog('Direct play: '+(ok?'YES':'NO (need remux/transcode)'),'info');
+  return ok;
 }
 
 function buildStreamUrl(playId,opts){
   opts=opts||{};
   var params=new URLSearchParams();
   params.set('api_key',API_KEY);
+  var msId=currentMediaSources[0]?currentMediaSources[0].Id:playId;
+
   if(opts.direct){
+    // Serve raw file
     params.set('Static','true');
+    params.set('MediaSourceId',msId);
     dlog('Mode: DIRECT (Static=true)','ok');
+    var url=SERVER+'/Videos/'+playId+'/stream.'+currentMediaSources[0].Container+'?'+params.toString();
+    dlog('URL: '+url.substring(0,150)+'...','dim');
+    return url;
   }else{
-    params.set('Static','false');
+    // Use Jellyfin's universal endpoint for proper HLS transcoding
+    // This is what the official Jellyfin web client uses
+    params.set('MediaSourceId',msId);
     params.set('VideoCodec','h264');
     params.set('AudioCodec','aac');
-    params.set('Container','mp4');
+    params.set('Container','ts');
+    params.set('TranscodingContainer','ts');
     params.set('TranscodingProtocol','http');
-    if(currentMediaSources[0])params.set('MediaSourceId',currentMediaSources[0].Id);
+    params.set('StartTimeTicks', String(Math.round((opts.seekTo||0)*10000000)));
+    params.set('CopyTimestamps','true');
     if(opts.audioIndex>=0)params.set('AudioStreamIndex',String(opts.audioIndex));
     if(opts.subtitleIndex>=0){params.set('SubtitleStreamIndex',String(opts.subtitleIndex));params.set('SubtitleMethod','Encode')}
     if(opts.quality&&opts.quality!=='auto'&&opts.quality!=='original'){params.set('VideoBitRate',opts.quality);params.set('AudioBitRate','192000')}
-    dlog('Mode: TRANSCODE (h264+aac, mp4)','warn');
+    dlog('Mode: TRANSCODE (h264+aac, ts container)','warn');
+    var url=SERVER+'/Videos/'+playId+'/stream.ts?'+params.toString();
+    dlog('URL: '+url.substring(0,150)+'...','dim');
+    return url;
   }
-  var url=SERVER+'/Videos/'+playId+'/stream?'+params.toString();
-  dlog('URL: '+url.substring(0,150)+'...','dim');
-  return url;
 }
 
 function loadStream(seekTo){
   if(!currentPlayId){dlog('No currentPlayId!','err');return}
   showLoading(true);
-  dlog('--- loadStream(seekTo='+Math.round(seekTo||0)+') ---','info');
+  seekTo=seekTo||0;
+  dlog('--- loadStream(seekTo='+Math.round(seekTo)+') ---','info');
 
   var ms=currentMediaSources[0];
   var direct=canDirectPlay(ms);
   if(currentAudioIndex>=0||currentSubIndex>=0){dlog('Track override -> force transcode','warn');direct=false}
+  if(currentQuality&&currentQuality!=='auto'){dlog('Quality override -> force transcode','warn');direct=false}
 
-  var opts={direct:direct};
+  var opts={direct:direct,seekTo:seekTo};
   if(currentAudioIndex>=0)opts.audioIndex=currentAudioIndex;
   if(currentSubIndex>=0)opts.subtitleIndex=currentSubIndex;
   if(currentQuality&&currentQuality!=='auto')opts.quality=currentQuality;
@@ -547,12 +565,16 @@ function loadStream(seekTo){
   video.onloadedmetadata=null;video.oncanplay=null;video.onerror=null;video.onloadeddata=null;video.onstalled=null;
   video.pause();
 
-  function attempt(streamUrl,num){
+  function attempt(streamUrl,num,isDirect){
     dlog('Attempt #'+num+': setting src','info');
 
     video.onloadedmetadata=function(){
       dlog('>> loadedmetadata (dur='+video.duration+')','ok');
-      if(seekTo>0&&isFinite(seekTo)&&isFinite(video.duration)){dlog('Seeking to '+seekTo.toFixed(1)+'s','info');video.currentTime=seekTo}
+      // For direct play, seek in browser. For transcode, Jellyfin handles it via StartTimeTicks
+      if(isDirect&&seekTo>0&&isFinite(seekTo)&&isFinite(video.duration)){
+        dlog('Seeking to '+seekTo.toFixed(1)+'s (direct mode)','info');
+        video.currentTime=seekTo;
+      }
     };
 
     video.oncanplay=function(){
@@ -566,13 +588,14 @@ function loadStream(seekTo){
       var c=video.error?video.error.code:'?';
       var m=video.error?video.error.message:'unknown';
       dlog('>> ERROR code='+c+' msg='+m,'err');
-      if(num===1&&direct){
+      if(num===1&&isDirect){
         dlog('Direct failed, retrying with transcode...','warn');
         opts.direct=false;
-        attempt(buildStreamUrl(currentPlayId,opts),2);
+        attempt(buildStreamUrl(currentPlayId,opts),2,false);
       }else{
         showLoading(false);
-        dlog('ALL ATTEMPTS FAILED','err');
+        dlog('ALL ATTEMPTS FAILED. Check Jellyfin server logs.','err');
+        dlog('Common fixes: enable transcoding in Jellyfin, install ffmpeg','err');
       }
     };
 
@@ -583,7 +606,7 @@ function loadStream(seekTo){
     video.load();
   }
 
-  attempt(url, direct?1:2);
+  attempt(url, direct?1:2, direct);
   video.volume=volume;video.muted=isMuted;
 }
 
